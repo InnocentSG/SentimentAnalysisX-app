@@ -28,10 +28,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import (confusion_matrix,
                            classification_report,
-                           roc_curve,
-                           auc,
-                           precision_recall_curve,
-                           average_precision_score)
+                           accuracy_score)
 
 # Download NLTK resources
 nltk.download('wordnet')
@@ -43,9 +40,9 @@ DATASET_ENCODING = "ISO-8859-1"
 SAMPLE_SIZE = 20000
 GOOGLE_DRIVE_FILE_ID = "1zUJPJM11P3AoLUmAzLS7-xAKMERSG-GV"
 DATASET_URL = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
-DATASET_PATH = "data/twitter_dataset_1.6M.csv"  # filename
+DATASET_PATH = "data/twitter_dataset_1.6M.csv"
 
-# Twitter API credentials (optional - for link prediction)
+# Twitter API credentials (optional)
 TWITTER_CONSUMER_KEY = st.secrets.get("TWITTER_CONSUMER_KEY", "")
 TWITTER_CONSUMER_SECRET = st.secrets.get("TWITTER_CONSUMER_SECRET", "")
 TWITTER_ACCESS_TOKEN = st.secrets.get("TWITTER_ACCESS_TOKEN", "")
@@ -60,16 +57,13 @@ st.set_page_config(
 
 @st.cache_data
 def load_dataset():
-    """Load and prepare the Twitter sentiment dataset from Google Drive"""
-    # Create data directory if it doesn't exist
+    """Load and prepare the Twitter sentiment dataset"""
     os.makedirs("data", exist_ok=True)
     
-    # Download if file doesn't exist
     if not os.path.exists(DATASET_PATH):
-        with st.spinner('Downloading dataset from Google Drive (this may take a few minutes)...'):
+        with st.spinner('Downloading dataset...'):
             try:
                 gdown.download(DATASET_URL, DATASET_PATH, quiet=False)
-                st.success("Dataset downloaded successfully!")
             except Exception as e:
                 st.error(f"Failed to download dataset: {e}")
                 st.stop()
@@ -78,13 +72,11 @@ def load_dataset():
         df = pd.read_csv(DATASET_PATH,
                         encoding=DATASET_ENCODING,
                         names=DATASET_COLUMNS)
-        # Convert to 3-class sentiment (0=negative, 1=neutral, 2=positive)
-        df['target'] = df['target'].replace(4, 2)  # Original dataset has 0=negative, 4=positive
-        # Add neutral samples (we'll create artificial neutral samples)
+        df['target'] = df['target'].replace(4, 2)  # Convert to 0=neg, 1=neutral, 2=pos
         pos_data = df[df['target'] == 2].sample(SAMPLE_SIZE, random_state=42)
         neg_data = df[df['target'] == 0].sample(SAMPLE_SIZE, random_state=42)
         neutral_data = df.sample(SAMPLE_SIZE, random_state=42)
-        neutral_data['target'] = 1  # Set neutral label
+        neutral_data['target'] = 1
         return pd.concat([pos_data, neg_data, neutral_data])
     except Exception as e:
         st.error(f"Error loading dataset: {e}")
@@ -98,35 +90,18 @@ class TextPreprocessor:
         self.tokenizer = RegexpTokenizer(r'\w+')
 
     def clean_text(self, text):
-        """Apply all cleaning steps to text"""
         text = str(text).lower()
-        text = self._remove_urls(text)
-        text = self._remove_punctuation(text)
-        text = self._remove_numbers(text)
-        text = self._remove_stopwords(text)
-        text = self._remove_repeating_chars(text)
+        text = re.sub('((www.[^\s]+)|(https?://[^\s]+))', ' ', text)
+        text = text.translate(str.maketrans('', '', string.punctuation))
+        text = re.sub('[0-9]+', '', text)
+        text = ' '.join([word for word in text.split() if word not in self.stopwords])
+        text = re.sub(r'(.)\1+', r'\1', text)
         tokens = self.tokenizer.tokenize(text)
         tokens = [self.stemmer.stem(token) for token in tokens]
         tokens = [self.lemmatizer.lemmatize(token) for token in tokens]
         return ' '.join(tokens)
 
-    def _remove_urls(self, text):
-        return re.sub('((www.[^\s]+)|(https?://[^\s]+))', ' ', text)
-
-    def _remove_punctuation(self, text):
-        return text.translate(str.maketrans('', '', string.punctuation))
-
-    def _remove_numbers(self, text):
-        return re.sub('[0-9]+', '', text)
-
-    def _remove_stopwords(self, text):
-        return ' '.join([word for word in text.split() if word not in self.stopwords])
-
-    def _remove_repeating_chars(self, text):
-        return re.sub(r'(.)\1+', r'\1', text)
-
 def plot_wordcloud(text, title):
-    """Generate and plot word cloud"""
     wc = WordCloud(max_words=1000, width=1600, height=800,
                   collocations=False).generate(text)
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -136,71 +111,38 @@ def plot_wordcloud(text, title):
     st.pyplot(fig)
 
 def plot_confusion_matrix(y_true, y_pred, classes):
-    """Plot confusion matrix with percentages"""
+    """Fixed version for multi-class classification"""
     cm = confusion_matrix(y_true, y_pred)
-    group_names = ['True Neg', 'False Pos', 'False Neg', 'True Pos', 'True Neu', 'False Neu']
-    group_percentages = ['{0:.2%}'.format(value) for value in cm.flatten()/np.sum(cm)]
-    labels = [f'{v1}\n{v2}' for v1, v2 in zip(group_names, group_percentages)]
-    labels = np.asarray(labels).reshape(len(classes), len(classes))
+    cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    sns.heatmap(cm, annot=labels, cmap='Blues', fmt='',
-               xticklabels=classes, yticklabels=classes, ax=ax)
+    sns.heatmap(
+        cm_percent,
+        annot=True,
+        fmt=".2%",
+        cmap="Blues",
+        xticklabels=classes,
+        yticklabels=classes,
+        ax=ax
+    )
     ax.set_xlabel('Predicted', fontsize=14)
     ax.set_ylabel('Actual', fontsize=14)
-    ax.set_title('Confusion Matrix', fontsize=18)
-    st.pyplot(fig)
-
-def plot_roc_curve(y_true, y_pred, model_name):
-    """Plot ROC curve with AUC score"""
-    fpr, tpr, _ = roc_curve(y_true, y_pred)
-    roc_auc = auc(fpr, tpr)
-
-    fig, ax = plt.subplots()
-    ax.plot(fpr, tpr, color='darkorange', lw=2,
-            label=f'ROC curve (AUC = {roc_auc:.2f})')
-    ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-    ax.set_xlim([0.0, 1.0])
-    ax.set_ylim([0.0, 1.05])
-    ax.set_xlabel('False Positive Rate')
-    ax.set_ylabel('True Positive Rate')
-    ax.set_title(f'ROC Curve - {model_name}')
-    ax.legend(loc="lower right")
-    st.pyplot(fig)
-
-def plot_precision_recall(y_true, y_pred, model_name):
-    """Plot Precision-Recall curve"""
-    precision, recall, _ = precision_recall_curve(y_true, y_pred)
-    avg_precision = average_precision_score(y_true, y_pred)
-
-    fig, ax = plt.subplots()
-    ax.plot(recall, precision, lw=2,
-            label=f'Precision-Recall (AP = {avg_precision:.2f})')
-    ax.set_xlabel('Recall')
-    ax.set_ylabel('Precision')
-    ax.set_title(f'Precision-Recall Curve - {model_name}')
-    ax.legend(loc='best')
+    ax.set_title('Confusion Matrix (Normalized)', fontsize=18)
     st.pyplot(fig)
 
 def evaluate_model(model, X_test, y_test, model_name):
-    """Evaluate model performance"""
     y_pred = model.predict(X_test)
 
-    st.subheader(f"Model Evaluation: {model_name}")
-
+    st.subheader(f"{model_name} Performance")
+    st.write(f"Accuracy: {accuracy_score(y_test, y_pred):.2%}")
+    
     st.write("Classification Report:")
     report = classification_report(y_test, y_pred, output_dict=True)
     st.table(pd.DataFrame(report).transpose())
 
     plot_confusion_matrix(y_test, y_pred, ['Negative', 'Neutral', 'Positive'])
-    # ROC and PR curves are for binary classification, so we'll skip for 3-class
-    # plot_roc_curve(y_test, y_pred, model_name)
-    # plot_precision_recall(y_test, y_pred, model_name)
-
-    return y_pred
 
 def get_twitter_client():
-    """Initialize Twitter API client"""
     if not all([TWITTER_CONSUMER_KEY, TWITTER_CONSUMER_SECRET, 
                TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]):
         return None
@@ -209,28 +151,23 @@ def get_twitter_client():
         auth.set_access_token(TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET)
         return tweepy.API(auth, wait_on_rate_limit=True)
     except Exception as e:
-        st.warning(f"Twitter API initialization failed: {e}")
+        st.warning(f"Twitter API failed: {e}")
         return None
 
 def predict_twitter_link(tweet_url, vectorizer, models, preprocessor):
-    """Predict sentiment from a Twitter link"""
-    # Extract tweet ID from URL
     tweet_id = re.search(r'status/(\d+)', tweet_url)
     if not tweet_id:
-        st.error("Invalid Twitter URL. Please provide a valid tweet URL.")
+        st.error("Invalid Twitter URL")
         return None
     
-    tweet_id = tweet_id.group(1)
     twitter_client = get_twitter_client()
-    
     if not twitter_client:
-        st.error("Twitter API credentials not configured. Cannot fetch tweets.")
+        st.error("Twitter API not configured")
         return None
     
     try:
-        tweet = twitter_client.get_status(tweet_id, tweet_mode='extended')
+        tweet = twitter_client.get_status(tweet_id.group(1), tweet_mode='extended')
         text = tweet.full_text
-        
         st.write("### Original Tweet:")
         st.write(text)
         
@@ -246,120 +183,82 @@ def predict_twitter_link(tweet_url, vectorizer, models, preprocessor):
         st.subheader("Prediction Results")
         for model_name, sentiment in results.items():
             st.metric(label=model_name, value=sentiment)
-            
-        return results
     except Exception as e:
         st.error(f"Error fetching tweet: {e}")
-        return None
 
 def main():
     st.title("🐦 Twitter Sentiment Analysis")
-    st.markdown("""
-    This app analyzes sentiment of tweets using different machine learning models.
-    The dataset is automatically downloaded from Google Drive.
-    """)
-
+    
     # Load data
     df = load_dataset()
-
-    # EDA Section
-    st.header("Exploratory Data Analysis")
+    
+    # EDA
+    st.header("Data Overview")
     st.write(f"Dataset shape: {df.shape}")
-    st.write(f"Class distribution:\n{df['target'].value_counts()}")
-
+    
     fig, ax = plt.subplots()
     sns.countplot(x='target', data=df, ax=ax)
-    ax.set_title('Class Distribution (0=Negative, 1=Neutral, 2=Positive)')
+    ax.set_title('Class Distribution')
     st.pyplot(fig)
-
+    
     # Preprocessing
     with st.spinner('Preprocessing text...'):
         preprocessor = TextPreprocessor()
         df['cleaned_text'] = df['text'].apply(preprocessor.clean_text)
-
+    
     # Word Clouds
     st.header("Word Clouds")
     col1, col2, col3 = st.columns(3)
-
     with col1:
-        st.subheader("Positive Tweets")
-        pos_text = ' '.join(df[df['target']==2]['cleaned_text'])
-        plot_wordcloud(pos_text, "Positive Tweets Word Cloud")
-
+        plot_wordcloud(' '.join(df[df['target']==2]['cleaned_text']), "Positive")
     with col2:
-        st.subheader("Neutral Tweets")
-        neu_text = ' '.join(df[df['target']==1]['cleaned_text'])
-        plot_wordcloud(neu_text, "Neutral Tweets Word Cloud")
-
+        plot_wordcloud(' '.join(df[df['target']==1]['cleaned_text']), "Neutral")
     with col3:
-        st.subheader("Negative Tweets")
-        neg_text = ' '.join(df[df['target']==0]['cleaned_text'])
-        plot_wordcloud(neg_text, "Negative Tweets Word Cloud")
-
+        plot_wordcloud(' '.join(df[df['target']==0]['cleaned_text']), "Negative")
+    
     # Model Training
-    st.header("Model Training and Evaluation")
-
-    # Split data
-    X = df['cleaned_text']
-    y = df['target']
+    st.header("Model Training")
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42)
-
-    # Vectorize text
+        df['cleaned_text'], df['target'], test_size=0.2, random_state=42)
+    
     with st.spinner('Vectorizing text...'):
         vectorizer = TfidfVectorizer(ngram_range=(1,2), max_features=100000)
         X_train_vec = vectorizer.fit_transform(X_train)
         X_test_vec = vectorizer.transform(X_test)
-
-    # Select models to run
-    st.sidebar.header("Model Selection")
-    run_nb = st.sidebar.checkbox("Bernoulli Naive Bayes", True)
-    run_svc = st.sidebar.checkbox("Linear SVC", True)
-    run_lr = st.sidebar.checkbox("Logistic Regression", True)
-
-    # Train and evaluate selected models
+    
+    # Model selection
+    st.sidebar.header("Models")
     models = {}
-    if run_nb:
-        models["Bernoulli Naive Bayes"] = BernoulliNB()
-    if run_svc:
+    if st.sidebar.checkbox("Naive Bayes", True):
+        models["Naive Bayes"] = BernoulliNB()
+    if st.sidebar.checkbox("Linear SVC", True):
         models["Linear SVC"] = LinearSVC(max_iter=1000, random_state=42)
-    if run_lr:
+    if st.sidebar.checkbox("Logistic Regression", True):
         models["Logistic Regression"] = LogisticRegression(max_iter=1000, random_state=42)
-
+    
+    # Train and evaluate
     for name, model in models.items():
         with st.spinner(f'Training {name}...'):
             model.fit(X_train_vec, y_train)
             evaluate_model(model, X_test_vec, y_test, name)
-
-    # Prediction Section
-    st.header("Sentiment Prediction")
-    prediction_mode = st.radio("Select prediction mode:", 
-                              ("Text Input", "Twitter Link"))
-
-    if prediction_mode == "Text Input":
-        # Live text prediction
-        user_input = st.text_area("Enter a tweet to analyze its sentiment:", "", height=100)
-
-        if user_input:
-            with st.spinner('Analyzing sentiment...'):
-                cleaned_input = preprocessor.clean_text(user_input)
-                input_vec = vectorizer.transform([cleaned_input])
-
-                results = {}
-                for name, model in models.items():
-                    prediction = model.predict(input_vec)[0]
-                    sentiment = "Positive" if prediction == 2 else "Negative" if prediction == 0 else "Neutral"
-                    results[name] = sentiment
-
-                st.subheader("Prediction Results")
-                for model_name, sentiment in results.items():
-                    st.metric(label=model_name, value=sentiment)
+    
+    # Prediction
+    st.header("Live Prediction")
+    option = st.radio("Input type:", ("Text", "Twitter URL"))
+    
+    if option == "Text":
+        text_input = st.text_area("Enter text to analyze:")
+        if text_input and models:
+            cleaned_input = preprocessor.clean_text(text_input)
+            input_vec = vectorizer.transform([cleaned_input])
+            results = {name: model.predict(input_vec)[0] for name, model in models.items()}
+            st.subheader("Results")
+            for name, pred in results.items():
+                st.write(f"{name}: {'Positive' if pred == 2 else 'Negative' if pred == 0 else 'Neutral'}")
     else:
-        # Twitter link prediction
-        tweet_url = st.text_input("Enter Twitter URL to analyze:", "")
-        if tweet_url:
-            with st.spinner('Fetching and analyzing tweet...'):
-                predict_twitter_link(tweet_url, vectorizer, models, preprocessor)
+        url_input = st.text_input("Enter Tweet URL:")
+        if url_input and models:
+            predict_twitter_link(url_input, vectorizer, models, preprocessor)
 
 if __name__ == "__main__":
     main()
