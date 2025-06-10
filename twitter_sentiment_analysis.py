@@ -14,6 +14,7 @@ import string
 import nltk
 import gdown
 import os
+import tweepy
 from nltk.tokenize import RegexpTokenizer
 from nltk.stem import PorterStemmer, WordNetLemmatizer
 from nltk.corpus import stopwords
@@ -44,6 +45,12 @@ GOOGLE_DRIVE_FILE_ID = "1zUJPJM11P3AoLUmAzLS7-xAKMERSG-GV"
 DATASET_URL = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
 DATASET_PATH = "data/twitter_dataset_1.6M.csv"  # filename
 
+# Twitter API credentials (optional - for link prediction)
+TWITTER_CONSUMER_KEY = st.secrets.get("TWITTER_CONSUMER_KEY", "")
+TWITTER_CONSUMER_SECRET = st.secrets.get("TWITTER_CONSUMER_SECRET", "")
+TWITTER_ACCESS_TOKEN = st.secrets.get("TWITTER_ACCESS_TOKEN", "")
+TWITTER_ACCESS_TOKEN_SECRET = st.secrets.get("TWITTER_ACCESS_TOKEN_SECRET", "")
+
 # Set page config
 st.set_page_config(
     page_title="Twitter Sentiment Analysis",
@@ -71,10 +78,14 @@ def load_dataset():
         df = pd.read_csv(DATASET_PATH,
                         encoding=DATASET_ENCODING,
                         names=DATASET_COLUMNS)
-        df['target'] = df['target'].replace(4, 1)
-        pos_data = df[df['target'] == 1].sample(SAMPLE_SIZE, random_state=42)
+        # Convert to 3-class sentiment (0=negative, 1=neutral, 2=positive)
+        df['target'] = df['target'].replace(4, 2)  # Original dataset has 0=negative, 4=positive
+        # Add neutral samples (we'll create artificial neutral samples)
+        pos_data = df[df['target'] == 2].sample(SAMPLE_SIZE, random_state=42)
         neg_data = df[df['target'] == 0].sample(SAMPLE_SIZE, random_state=42)
-        return pd.concat([pos_data, neg_data])
+        neutral_data = df.sample(SAMPLE_SIZE, random_state=42)
+        neutral_data['target'] = 1  # Set neutral label
+        return pd.concat([pos_data, neg_data, neutral_data])
     except Exception as e:
         st.error(f"Error loading dataset: {e}")
         st.stop()
@@ -127,10 +138,10 @@ def plot_wordcloud(text, title):
 def plot_confusion_matrix(y_true, y_pred, classes):
     """Plot confusion matrix with percentages"""
     cm = confusion_matrix(y_true, y_pred)
-    group_names = ['True Neg', 'False Pos', 'False Neg', 'True Pos']
+    group_names = ['True Neg', 'False Pos', 'False Neg', 'True Pos', 'True Neu', 'False Neu']
     group_percentages = ['{0:.2%}'.format(value) for value in cm.flatten()/np.sum(cm)]
     labels = [f'{v1}\n{v2}' for v1, v2 in zip(group_names, group_percentages)]
-    labels = np.asarray(labels).reshape(2,2)
+    labels = np.asarray(labels).reshape(len(classes), len(classes))
 
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(cm, annot=labels, cmap='Blues', fmt='',
@@ -181,11 +192,65 @@ def evaluate_model(model, X_test, y_test, model_name):
     report = classification_report(y_test, y_pred, output_dict=True)
     st.table(pd.DataFrame(report).transpose())
 
-    plot_confusion_matrix(y_test, y_pred, ['Negative', 'Positive'])
-    plot_roc_curve(y_test, y_pred, model_name)
-    plot_precision_recall(y_test, y_pred, model_name)
+    plot_confusion_matrix(y_test, y_pred, ['Negative', 'Neutral', 'Positive'])
+    # ROC and PR curves are for binary classification, so we'll skip for 3-class
+    # plot_roc_curve(y_test, y_pred, model_name)
+    # plot_precision_recall(y_test, y_pred, model_name)
 
     return y_pred
+
+def get_twitter_client():
+    """Initialize Twitter API client"""
+    if not all([TWITTER_CONSUMER_KEY, TWITTER_CONSUMER_SECRET, 
+               TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]):
+        return None
+    try:
+        auth = tweepy.OAuthHandler(TWITTER_CONSUMER_KEY, TWITTER_CONSUMER_SECRET)
+        auth.set_access_token(TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET)
+        return tweepy.API(auth, wait_on_rate_limit=True)
+    except Exception as e:
+        st.warning(f"Twitter API initialization failed: {e}")
+        return None
+
+def predict_twitter_link(tweet_url, vectorizer, models, preprocessor):
+    """Predict sentiment from a Twitter link"""
+    # Extract tweet ID from URL
+    tweet_id = re.search(r'status/(\d+)', tweet_url)
+    if not tweet_id:
+        st.error("Invalid Twitter URL. Please provide a valid tweet URL.")
+        return None
+    
+    tweet_id = tweet_id.group(1)
+    twitter_client = get_twitter_client()
+    
+    if not twitter_client:
+        st.error("Twitter API credentials not configured. Cannot fetch tweets.")
+        return None
+    
+    try:
+        tweet = twitter_client.get_status(tweet_id, tweet_mode='extended')
+        text = tweet.full_text
+        
+        st.write("### Original Tweet:")
+        st.write(text)
+        
+        cleaned_text = preprocessor.clean_text(text)
+        input_vec = vectorizer.transform([cleaned_text])
+        
+        results = {}
+        for name, model in models.items():
+            prediction = model.predict(input_vec)[0]
+            sentiment = "Positive" if prediction == 2 else "Negative" if prediction == 0 else "Neutral"
+            results[name] = sentiment
+        
+        st.subheader("Prediction Results")
+        for model_name, sentiment in results.items():
+            st.metric(label=model_name, value=sentiment)
+            
+        return results
+    except Exception as e:
+        st.error(f"Error fetching tweet: {e}")
+        return None
 
 def main():
     st.title("🐦 Twitter Sentiment Analysis")
@@ -204,7 +269,7 @@ def main():
 
     fig, ax = plt.subplots()
     sns.countplot(x='target', data=df, ax=ax)
-    ax.set_title('Class Distribution')
+    ax.set_title('Class Distribution (0=Negative, 1=Neutral, 2=Positive)')
     st.pyplot(fig)
 
     # Preprocessing
@@ -214,14 +279,19 @@ def main():
 
     # Word Clouds
     st.header("Word Clouds")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         st.subheader("Positive Tweets")
-        pos_text = ' '.join(df[df['target']==1]['cleaned_text'])
+        pos_text = ' '.join(df[df['target']==2]['cleaned_text'])
         plot_wordcloud(pos_text, "Positive Tweets Word Cloud")
 
     with col2:
+        st.subheader("Neutral Tweets")
+        neu_text = ' '.join(df[df['target']==1]['cleaned_text'])
+        plot_wordcloud(neu_text, "Neutral Tweets Word Cloud")
+
+    with col3:
         st.subheader("Negative Tweets")
         neg_text = ' '.join(df[df['target']==0]['cleaned_text'])
         plot_wordcloud(neg_text, "Negative Tweets Word Cloud")
@@ -261,23 +331,35 @@ def main():
             model.fit(X_train_vec, y_train)
             evaluate_model(model, X_test_vec, y_test, name)
 
-    # Live prediction
-    st.header("Live Sentiment Prediction")
-    user_input = st.text_area("Enter a tweet to analyze its sentiment:", "", height=100)
+    # Prediction Section
+    st.header("Sentiment Prediction")
+    prediction_mode = st.radio("Select prediction mode:", 
+                              ("Text Input", "Twitter Link"))
 
-    if user_input:
-        with st.spinner('Analyzing sentiment...'):
-            cleaned_input = preprocessor.clean_text(user_input)
-            input_vec = vectorizer.transform([cleaned_input])
+    if prediction_mode == "Text Input":
+        # Live text prediction
+        user_input = st.text_area("Enter a tweet to analyze its sentiment:", "", height=100)
 
-            results = {}
-            for name, model in models.items():
-                prediction = model.predict(input_vec)[0]
-                results[name] = "Positive" if prediction == 1 else "Negative"
+        if user_input:
+            with st.spinner('Analyzing sentiment...'):
+                cleaned_input = preprocessor.clean_text(user_input)
+                input_vec = vectorizer.transform([cleaned_input])
 
-            st.subheader("Prediction Results")
-            for model_name, sentiment in results.items():
-                st.metric(label=model_name, value=sentiment)
+                results = {}
+                for name, model in models.items():
+                    prediction = model.predict(input_vec)[0]
+                    sentiment = "Positive" if prediction == 2 else "Negative" if prediction == 0 else "Neutral"
+                    results[name] = sentiment
+
+                st.subheader("Prediction Results")
+                for model_name, sentiment in results.items():
+                    st.metric(label=model_name, value=sentiment)
+    else:
+        # Twitter link prediction
+        tweet_url = st.text_input("Enter Twitter URL to analyze:", "")
+        if tweet_url:
+            with st.spinner('Fetching and analyzing tweet...'):
+                predict_twitter_link(tweet_url, vectorizer, models, preprocessor)
 
 if __name__ == "__main__":
     main()
