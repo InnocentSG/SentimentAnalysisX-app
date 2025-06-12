@@ -142,6 +142,24 @@ def evaluate_model(model, X_test, y_test, model_name):
 
     plot_confusion_matrix(y_test, y_pred, ['Negative', 'Neutral', 'Positive'])
 
+@st.cache_resource
+def get_vectorizer(text_data):
+    """Cache the vectorizer to avoid refitting"""
+    vectorizer = TfidfVectorizer(ngram_range=(1,2), max_features=100000)
+    return vectorizer.fit(text_data)
+
+@st.cache_resource
+def train_models(model_choices, X_train_vec, y_train):
+    """Train and cache selected models"""
+    models = {}
+    if "Naive Bayes" in model_choices:
+        models["Naive Bayes"] = BernoulliNB().fit(X_train_vec, y_train)
+    if "Linear SVC" in model_choices:
+        models["Linear SVC"] = LinearSVC(max_iter=1000, random_state=42).fit(X_train_vec, y_train)
+    if "Logistic Regression" in model_choices:
+        models["Logistic Regression"] = LogisticRegression(max_iter=1000, random_state=42).fit(X_train_vec, y_train)
+    return models
+
 def get_twitter_client():
     if not all([TWITTER_CONSUMER_KEY, TWITTER_CONSUMER_SECRET, 
                TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]):
@@ -222,33 +240,33 @@ def main():
         df['cleaned_text'], df['target'], test_size=0.2, random_state=42)
     
     with st.spinner('Vectorizing text...'):
-        vectorizer = TfidfVectorizer(ngram_range=(1,2), max_features=100000)
-        X_train_vec = vectorizer.fit_transform(X_train)
+        vectorizer = get_vectorizer(X_train)
+        X_train_vec = vectorizer.transform(X_train)
         X_test_vec = vectorizer.transform(X_test)
     
     # Model selection
     st.sidebar.header("Models")
-    models = {}
-    if st.sidebar.checkbox("Naive Bayes", True):
-        models["Naive Bayes"] = BernoulliNB()
-    if st.sidebar.checkbox("Linear SVC", True):
-        models["Linear SVC"] = LinearSVC(max_iter=1000, random_state=42)
-    if st.sidebar.checkbox("Logistic Regression", True):
-        models["Logistic Regression"] = LogisticRegression(max_iter=1000, random_state=42)
+    model_choices = []
+    if st.sidebar.checkbox("Naive Bayes", True, key='nb'):
+        model_choices.append("Naive Bayes")
+    if st.sidebar.checkbox("Linear SVC", True, key='svc'):
+        model_choices.append("Linear SVC")
+    if st.sidebar.checkbox("Logistic Regression", True, key='lr'):
+        model_choices.append("Logistic Regression")
     
-    # Train and evaluate
-    for name, model in models.items():
-        with st.spinner(f'Training {name}...'):
-            model.fit(X_train_vec, y_train)
+    # Train and evaluate models (cached)
+    if model_choices:
+        models = train_models(model_choices, X_train_vec, y_train)
+        for name, model in models.items():
             evaluate_model(model, X_test_vec, y_test, name)
     
     # Prediction
     st.header("Live Prediction")
-    option = st.radio("Input type:", ("Text", "Twitter URL"))
+    option = st.radio("Input type:", ("Text", "Twitter URL"), key='input_type')
     
     if option == "Text":
-        text_input = st.text_area("Enter text to analyze:")
-        if text_input and models:
+        text_input = st.text_area("Enter text to analyze:", key='text_input')
+        if text_input and 'models' in locals():
             cleaned_input = preprocessor.clean_text(text_input)
             input_vec = vectorizer.transform([cleaned_input])
             results = {name: model.predict(input_vec)[0] for name, model in models.items()}
@@ -256,8 +274,8 @@ def main():
             for name, pred in results.items():
                 st.write(f"{name}: {'Positive' if pred == 2 else 'Negative' if pred == 0 else 'Neutral'}")
     else:
-        url_input = st.text_input("Enter Tweet URL:")
-        if url_input and models:
+        url_input = st.text_input("Enter Tweet URL:", key='tweet_url')
+        if url_input and 'models' in locals():
             predict_twitter_link(url_input, vectorizer, models, preprocessor)
 
 if __name__ == "__main__":
