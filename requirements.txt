@@ -1,12 +1,10 @@
-gdown
 streamlit
 pandas
 numpy
-nltk
-scikit-learn
 matplotlib
 seaborn
+scikit-learn
+nltk
 wordcloud
+gdown
 tweepy
-python-dotenv==1.0.0
-joblib==1.3.2
