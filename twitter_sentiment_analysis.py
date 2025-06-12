@@ -51,7 +51,7 @@ TWITTER_ACCESS_TOKEN_SECRET = st.secrets.get("TWITTER_ACCESS_TOKEN_SECRET", "")
 # Set page config
 st.set_page_config(
     page_title="Twitter Sentiment Analysis",
-    page_icon="🐦",
+    page_icon="X",
     layout="wide"
 )
 
