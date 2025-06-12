@@ -51,11 +51,11 @@ TWITTER_ACCESS_TOKEN_SECRET = st.secrets.get("TWITTER_ACCESS_TOKEN_SECRET", "")
 # Set page config
 st.set_page_config(
     page_title="Twitter Sentiment Analysis",
-    page_icon="X",
+    page_icon="🐦",
     layout="wide"
 )
 
-@st.cache_data
+@st.cache_data(persist=True)
 def load_dataset():
     """Load and prepare the Twitter sentiment dataset"""
     os.makedirs("data", exist_ok=True)
@@ -111,7 +111,6 @@ def plot_wordcloud(text, title):
     st.pyplot(fig)
 
 def plot_confusion_matrix(y_true, y_pred, classes):
-    """Fixed version for multi-class classification"""
     cm = confusion_matrix(y_true, y_pred)
     cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
 
@@ -142,23 +141,26 @@ def evaluate_model(model, X_test, y_test, model_name):
 
     plot_confusion_matrix(y_test, y_pred, ['Negative', 'Neutral', 'Positive'])
 
-@st.cache_resource
-def get_vectorizer(text_data):
-    """Cache the vectorizer to avoid refitting"""
+@st.cache_resource(show_spinner=False)
+def get_vectorizer(_df_text):
+    """Cache the vectorizer separately"""
     vectorizer = TfidfVectorizer(ngram_range=(1,2), max_features=100000)
-    return vectorizer.fit(text_data)
+    return vectorizer.fit(_df_text)
 
-@st.cache_resource
-def train_models(model_choices, X_train_vec, y_train):
-    """Train and cache selected models"""
-    models = {}
-    if "Naive Bayes" in model_choices:
-        models["Naive Bayes"] = BernoulliNB().fit(X_train_vec, y_train)
-    if "Linear SVC" in model_choices:
-        models["Linear SVC"] = LinearSVC(max_iter=1000, random_state=42).fit(X_train_vec, y_train)
-    if "Logistic Regression" in model_choices:
-        models["Logistic Regression"] = LogisticRegression(max_iter=1000, random_state=42).fit(X_train_vec, y_train)
-    return models
+@st.cache_resource(show_spinner=False)
+def get_naive_bayes(_X_train, _y_train):
+    model = BernoulliNB()
+    return model.fit(_X_train, _y_train)
+
+@st.cache_resource(show_spinner=False)
+def get_svc(_X_train, _y_train):
+    model = LinearSVC(max_iter=1000, random_state=42)
+    return model.fit(_X_train, _y_train)
+
+@st.cache_resource(show_spinner=False)
+def get_logreg(_X_train, _y_train):
+    model = LogisticRegression(max_iter=1000, random_state=42)
+    return model.fit(_X_train, _y_train)
 
 def get_twitter_client():
     if not all([TWITTER_CONSUMER_KEY, TWITTER_CONSUMER_SECRET, 
@@ -254,9 +256,17 @@ def main():
     if st.sidebar.checkbox("Logistic Regression", True, key='lr'):
         model_choices.append("Logistic Regression")
     
-    # Train and evaluate models (cached)
+    # Train and evaluate models
+    models = {}
     if model_choices:
-        models = train_models(model_choices, X_train_vec, y_train)
+        with st.spinner('Training models...'):
+            if "Naive Bayes" in model_choices:
+                models["Naive Bayes"] = get_naive_bayes(X_train_vec, y_train)
+            if "Linear SVC" in model_choices:
+                models["Linear SVC"] = get_svc(X_train_vec, y_train)
+            if "Logistic Regression" in model_choices:
+                models["Logistic Regression"] = get_logreg(X_train_vec, y_train)
+        
         for name, model in models.items():
             evaluate_model(model, X_test_vec, y_test, name)
     
@@ -266,7 +276,7 @@ def main():
     
     if option == "Text":
         text_input = st.text_area("Enter text to analyze:", key='text_input')
-        if text_input and 'models' in locals():
+        if text_input and models:
             cleaned_input = preprocessor.clean_text(text_input)
             input_vec = vectorizer.transform([cleaned_input])
             results = {name: model.predict(input_vec)[0] for name, model in models.items()}
@@ -275,7 +285,7 @@ def main():
                 st.write(f"{name}: {'Positive' if pred == 2 else 'Negative' if pred == 0 else 'Neutral'}")
     else:
         url_input = st.text_input("Enter Tweet URL:", key='tweet_url')
-        if url_input and 'models' in locals():
+        if url_input and models:
             predict_twitter_link(url_input, vectorizer, models, preprocessor)
 
 if __name__ == "__main__":
